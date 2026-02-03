@@ -17,7 +17,7 @@ class VoteService {
   
   public isGlobalTestMode = false;
   public isVotingOpen = true; 
-  public useStaffVerification = true; // New flag for verification toggle
+  public useStaffVerification = true; 
   public isRunningStressTest = false;
   private stressTestInterval: any = null;
 
@@ -162,8 +162,7 @@ class VoteService {
       let count = 0;
       
       lines.forEach(line => {
-        const id = line.trim().toUpperCase(); // Normalize to uppercase
-        // Changed: Removed numeric-only restriction, allowing alphanumeric 8-char IDs
+        const id = line.trim().toUpperCase(); 
         if (id.length === 8) {
           updates[`staff_list/${id}`] = { used: false };
           count++;
@@ -174,7 +173,6 @@ class VoteService {
 
       await update(ref(db), updates);
       await update(ref(db, 'stats'), { authorizedStaffCount: count });
-      // Ensure verification is ON if list is uploaded
       await update(ref(db, 'settings'), { useStaffVerification: true });
       return { success: true, message: `成功上傳 ${count} 組工號名單！` };
     } catch (e: any) {
@@ -215,14 +213,12 @@ class VoteService {
     if (!isStressTest && !this.isVotingOpen) return { success: false, message: "投票通道已關閉。" };
     
     const staffId = rawStaffId.trim().toUpperCase();
-    // Check if we need staff verification
     const needsVerification = this.useStaffVerification && !isStressTest;
     const isMasterKey = staffId === "16888";
     
     if (needsVerification && !isMasterKey) {
         if (!this.isGlobalTestMode && this.hasVoted()) return { success: false, message: "您已經參與過投票囉！" };
         
-        // Changed: Removed numeric-only restriction for validation
         if (staffId.length !== 8) {
             return { success: false, message: "請輸入正確的 8 碼工號。" };
         }
@@ -238,7 +234,6 @@ class VoteService {
             return { success: false, message: "此工號已參與過投票。" };
         }
     } else if (!isStressTest && !this.isGlobalTestMode) {
-        // Fallback to fingerprint check for open voting
         if (this.hasVoted()) return { success: false, message: "您已經參與過投票囉！" };
     }
 
@@ -342,6 +337,7 @@ class VoteService {
       updates['vote_details'] = null;
       updates['vote_details2'] = null;
       updates['real_scores_backup'] = null;
+      updates['simulation_logs'] = null;
       updates['stats/masterKeyCount'] = 0;
       await update(ref(db), updates);
     }
@@ -414,8 +410,30 @@ class VoteService {
     if (!snapshot.exists()) return { success: false, message: "無參賽者資料" };
     
     const data = snapshot.val();
-    const candidatesArray = Object.keys(data).map(id => {
-        const c = data[id];
+    const updates: any = {};
+    
+    // 1. 處理先前的模擬工號還原 (避免重複堆疊)
+    const logSnap = await get(ref(db, 'simulation_logs/inflated_staff_ids'));
+    let previouslyInflatedIds: string[] = [];
+    if (logSnap.exists()) {
+        previouslyInflatedIds = logSnap.val() || [];
+        previouslyInflatedIds.forEach(id => {
+            updates[`staff_list/${id}/used`] = false;
+        });
+    }
+
+    // 2. 備份真實數據 (如果尚未備份)
+    const backupSnap = await get(ref(db, 'real_scores_backup'));
+    let realBaseData = data;
+    if (backupSnap.exists()) {
+        realBaseData = backupSnap.val();
+    } else {
+        updates['real_scores_backup'] = data;
+    }
+
+    // 3. 提取真實得分 (計算比例)
+    const candidatesArray = Object.keys(realBaseData).map(id => {
+        const c = realBaseData[id];
         let sS = c.scoreSinging || 0;
         let sP = c.scorePopularity || 0;
         let sC = c.scoreCostume || 0;
@@ -432,30 +450,24 @@ class VoteService {
     const realTotalS = candidatesArray.reduce((sum, c) => sum + c.scoreSinging, 0);
     const realTotalP = candidatesArray.reduce((sum, c) => sum + c.scorePopularity, 0);
     const realTotalCo = candidatesArray.reduce((sum, c) => sum + c.scoreCostume, 0);
+    const currentRealVotesCount = Math.max(realTotalS, realTotalP, realTotalCo);
 
     if (realTotalS === 0 || realTotalP === 0 || realTotalCo === 0) 
       return { success: false, message: "目前尚無完整真實選票，無法執行等比縮放。" };
 
-    const updates: any = {};
-    const backupSnap = await get(ref(db, 'real_scores_backup'));
-    if (!backupSnap.exists()) {
-      updates['real_scores_backup'] = data;
-    }
-
+    // 4. 計算模擬分佈
     const distribute = (total: number, realTotal: number, key: string) => {
       let list: string[] = [];
       let distributedCount = 0;
       candidatesArray.forEach((c: any, idx) => {
         const jitter = useGroupedScaling ? (0.98 + Math.random() * 0.04) : 1.0;
         let count = Math.round(((c[key] || 0) / realTotal) * total * jitter);
-        
         if (idx === candidatesArray.length - 1) {
             count = Math.max(0, total - distributedCount);
         }
         distributedCount += count;
         for(let i=0; i<count; i++) list.push(c.id);
       });
-      
       for (let i = list.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [list[i], list[j]] = [list[j], list[i]];
@@ -467,33 +479,13 @@ class VoteService {
     const pList = distribute(target, realTotalP, 'scorePopularity');
     const coList = distribute(target, realTotalCo, 'scoreCostume');
 
-    const virtualDetails: any = {};
-    const virtualFp: any = {};
+    // 5. 更新參賽者得分為目標總數
     const newCandidateScores: any = {};
-    candidatesArray.forEach(c => {
-        newCandidateScores[c.id] = { s: 0, p: 0, co: 0 };
-    });
-
+    candidatesArray.forEach(c => newCandidateScores[c.id] = { s: 0, p: 0, co: 0 });
     for (let i = 0; i < target; i++) {
-      const detailId = this.generateRandomId(20); 
-      const fpId = this.generateRandomId(32); 
-
-      const sId = sList[i] || sList[0];
-      const pId = pList[i] || pList[0];
-      const coId = coList[i] || coList[0];
-
-      virtualDetails[detailId] = {
-        singing: sId,
-        popularity: pId,
-        costume: coId,
-        timestamp: Date.now() - Math.floor(Math.random() * 3600000)
-      };
-      
-      virtualFp[fpId] = true;
-
-      newCandidateScores[sId].s++;
-      newCandidateScores[pId].p++;
-      newCandidateScores[coId].co++;
+        newCandidateScores[sList[i]].s++;
+        newCandidateScores[pList[i]].p++;
+        newCandidateScores[coList[i]].co++;
     }
 
     Object.keys(newCandidateScores).forEach(id => {
@@ -505,12 +497,52 @@ class VoteService {
         updates[`candidates/${id}/shards`] = null; 
     });
 
+    // 6. 尋找未使用的工號並連動
+    const neededNewVotes = Math.max(0, target - currentRealVotesCount);
+    const staffSnap = await get(ref(db, 'staff_list'));
+    const staffListData = staffSnap.val() || {};
+    
+    // 過濾出目前還沒投過票的工號
+    const availableStaffIds = Object.keys(staffListData).filter(id => !staffListData[id].used);
+    
+    // 隨機抽選
+    const selectedStaffIds = availableStaffIds
+      .sort(() => 0.5 - Math.random())
+      .slice(0, neededNewVotes);
+
+    // 儲存至模擬日誌
+    updates['simulation_logs/inflated_staff_ids'] = selectedStaffIds;
+    
+    // 將選中的工號標記為 true
+    selectedStaffIds.forEach(id => {
+      updates[`staff_list/${id}/used`] = true;
+    });
+
+    // 7. 產生虛擬池記錄 (僅產生差額部分的詳細記錄)
+    const virtualDetails: any = {};
+    const virtualFp: any = {};
+    for (let i = 0; i < neededNewVotes; i++) {
+      const detailId = this.generateRandomId(20); 
+      const fpId = this.generateRandomId(32); 
+      const staffId = selectedStaffIds[i] || `VIRTUAL_${i}`;
+
+      virtualDetails[detailId] = {
+        singing: sList[target - 1 - i],
+        popularity: pList[target - 1 - i],
+        costume: coList[target - 1 - i],
+        staffId: staffId,
+        isSimulated: true,
+        timestamp: Date.now() - Math.floor(Math.random() * 3600000)
+      };
+      virtualFp[fpId] = true;
+    }
+
     updates['vote_details2'] = virtualDetails;
     updates['voted_fingerprints2'] = virtualFp;
 
     try {
       await update(ref(db), updates);
-      return { success: true, message: `模擬成功！已精確生成 ${target} 筆數據。` };
+      return { success: true, message: `維護成功！總計：${target} 票。本次隨機動用 ${selectedStaffIds.length} 組工號。` };
     } catch (e: any) {
       return { success: false, message: `執行失敗: ${e.message}` };
     }
@@ -526,6 +558,16 @@ class VoteService {
       const realData = backupSnap.val();
       const updates: any = {};
       
+      // 1. 還原被模擬系統標記為 true 的工號 (精確回滾)
+      const logSnap = await get(ref(db, 'simulation_logs/inflated_staff_ids'));
+      if (logSnap.exists()) {
+        const inflatedIds = logSnap.val() as string[];
+        inflatedIds.forEach(id => {
+          updates[`staff_list/${id}/used`] = false;
+        });
+      }
+
+      // 2. 還原參賽者真實票數
       Object.keys(realData).forEach(id => {
         const c = realData[id];
         updates[`candidates/${id}/scoreSinging`] = c.scoreSinging || 0;
@@ -535,13 +577,15 @@ class VoteService {
         updates[`candidates/${id}/shards`] = c.shards || null;
       });
 
+      // 3. 清理戰場
       updates['vote_details2'] = null;
       updates['voted_fingerprints2'] = null;
       updates['real_scores_backup'] = null;
+      updates['simulation_logs'] = null;
 
       await update(ref(db), updates);
       
-      return { success: true, message: "✅ 還原成功！" };
+      return { success: true, message: "✅ 還原成功！工號狀態與真實票數已精確回滾。" };
     } catch (e: any) {
       return { success: false, message: `還原失敗: ${e.message}` };
     }

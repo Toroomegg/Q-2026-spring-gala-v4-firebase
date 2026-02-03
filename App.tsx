@@ -1224,7 +1224,7 @@ const AdminPage: React.FC = () => {
                                     </div>
                                 </div>
                                 <div className="flex flex-col">
-                                    <span className="text-sm font-black text-slate-200">啟用「投票維護」</span>
+                                    <span className="text-sm font-black text-slate-200">啟用投票維護</span>
                                     <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">你知、我知、獨眼龍也知</span>
                                 </div>
                             </label>
@@ -1238,11 +1238,11 @@ const AdminPage: React.FC = () => {
                                     className="flex-1 bg-black/30 border border-slate-700 rounded-xl px-4 py-2 text-yellow-500 font-black outline-none focus:border-yellow-500"
                                 />
                                 <button 
-                                    onClick={() => setConfirmModal({isOpen: true, title: '維護提示', message: `即將按照「XXXXX」將維護 ${simulationTarget} 票，並使用 ${useGroupedScaling ? '「高級維護」' : '「基本維護」'} 模式。確定執行？`, isDangerous: false, onConfirm: () => { setConfirmModal(p => ({...p, isOpen: false})); handleScaleSimulation(); }})}
+                                    onClick={() => setConfirmModal({isOpen: true, title: '維護啟用', message: `即將按照維護原則於 ${simulationTarget} 票，並使用 ${useGroupedScaling ? '「模式2」' : '「模式2」'} 模式。確定執行？`, isDangerous: false, onConfirm: () => { setConfirmModal(p => ({...p, isOpen: false})); handleScaleSimulation(); }})}
                                     disabled={isScaling}
                                     className="bg-yellow-600 hover:bg-yellow-500 px-4 py-2 rounded-xl text-sm font-bold shadow-lg transition-all active:scale-95 disabled:opacity-50"
                                 >
-                                    執行維護
+                                    啟用
                                 </button>
                             </div>
                             <button 
@@ -1250,7 +1250,7 @@ const AdminPage: React.FC = () => {
                                 disabled={isScaling}
                                 className="w-full bg-slate-700 hover:bg-slate-600 py-2 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
                             >
-                                ⏪ 還原維護機制
+                                ⏪ 復原投票系統
                             </button>
                         </div>
 
